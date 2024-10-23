@@ -1,0 +1,167 @@
+---
+- name: Install K3S
+  hosts: nodes
+  tasks:
+    #    - name: Update & Upgrade packages
+    #      become: yes
+    #      ansible.builtin.apt:
+    #        name: "*"
+    #        state: latest
+    #        update_cache: yes
+    #        autoremove: yes
+    #        autoclean: yes
+    #      ignore_errors: true
+
+    - name: Set hostnames
+      become: yes
+      ansible.builtin.hostname:
+        name: "{{ inventory_hostname }}"
+
+    - name: Add nodes at the bottom of /etc/hosts file
+      become: yes
+      ansible.builtin.blockinfile:
+        path: /etc/hosts
+        block: |
+          {% for host in groups['nodes'] %}
+          {{ hostvars[host].ansible_host }} {{ host }}
+          {% endfor %}
+        marker: "# {mark} ANSIBLE MANAGED BLOCK K3S NODES"
+      when: "'ansible_host' in hostvars[inventory_hostname]"
+
+    - name: Create /etc/rancher/k3s
+      become: yes
+      ansible.builtin.file:
+        path: /etc/rancher/k3s
+        state: directory
+        mode: 0755
+
+    - name: initiate K3S cluster on the root node
+      become: yes
+      ansible.builtin.shell: curl -sfL https://get.k3s.io | K3S_TOKEN=k3s-token sh -s - server --cluster-init --disable=traefik
+      when: "inventory_hostname == groups['master_nodes'][0]"
+      ignore_errors: true
+      # Finetune to check if installation script is running?
+
+    - name: Wait until root node is ready
+      ansible.builtin.shell: systemctl is-active k3s
+      register: k3s_status
+      until: k3s_status.stdout == "active"
+      when: "inventory_hostname == groups['master_nodes'][0]"
+
+    - name: Copy master-config.yaml.jinja2 to /etc/rancher/k3s/
+      become: yes
+      ansible.builtin.template:
+        src: ../templates/master-config.yaml.jinja2
+        dest: /etc/rancher/k3s/config.yaml
+        mode: 0644
+      vars:
+        host: "{{ hostvars[groups['master_nodes'][0]].ansible_host }}"
+      when: "inventory_hostname in groups['master_nodes']"
+
+    - name: Add additional master nodes to the cluster
+      become: yes
+      ansible.builtin.shell: curl -sfL https://get.k3s.io | K3S_TOKEN=k3s-token sh -s - server --disable=traefik
+      when: "inventory_hostname in groups['master_nodes'] and inventory_hostname != groups['master_nodes'][0]"
+
+    - name: Copy worker-config.yaml.jinja2 to /etc/rancher/k3s/
+      become: yes
+      ansible.builtin.template:
+        src: ../templates/worker-config.yaml.jinja2
+        dest: /etc/rancher/k3s/config.yaml
+        mode: 0644
+      vars:
+        host: "{{ hostvars[groups['master_nodes'][0]].ansible_host }}"
+      when: "inventory_hostname in groups['worker_nodes']"
+
+    - name: Add additional worker nodes to the cluster
+      become: yes
+      ansible.builtin.shell: curl -sfL https://get.k3s.io | K3S_TOKEN=k3s-token sh -s - agent
+      when: "inventory_hostname in groups['worker_nodes']"
+
+    - name: Edit config.yaml to add additional configurations
+      become: yes
+      ansible.builtin.template:
+        src: ../templates/master-config.yaml.jinja2
+        dest: /etc/rancher/k3s/config.yaml
+        mode: 0644
+      vars:
+        host: "{{ ansible_host }}"
+      when: "inventory_hostname in groups['master_nodes']"
+
+    - name: Restart K3S On Master Nodes
+      become: yes
+      ansible.builtin.systemd:
+        name: k3s
+        state: restarted
+        enabled: yes
+      when: "inventory_hostname in groups['master_nodes']"
+
+    - name: Restart K3S On Worker Nodes
+      become: yes
+      ansible.builtin.systemd:
+        name: k3s-agent
+        state: restarted
+        enabled: yes
+      when: "inventory_hostname in groups['worker_nodes']"
+
+    - name: Wait Until K3s service started
+      ansible.builtin.shell: systemctl is-active k3s
+      register: k3s_status
+      until: k3s_status.stdout == "active"
+      retries: 10
+      when: "inventory_hostname in groups['master_nodes']"  # TODO: Fix this for all the nodes
+
+    - name: Create .kube directory on the root node
+      become: yes
+      ansible.builtin.file:
+        path: "{{ ansible_facts['env']['HOME'] }}/.kube"
+        state: directory
+        mode: 0755
+      when: "inventory_hostname == groups['master_nodes'][0]"
+
+    - name: Copy kubeconfig to .kube directory
+      become: yes
+      ansible.builtin.copy:
+        src: /etc/rancher/k3s/k3s.yaml
+        dest: "{{ ansible_facts['env']['HOME'] }}/.kube/config"
+        remote_src: yes
+        mode: 0600
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+      when: "inventory_hostname == groups['master_nodes'][0]"
+
+    - name: Install auto-completion on the root node
+      become: yes
+      ansible.builtin.apt:
+        name: bash-completion
+        state: present
+      when: "inventory_hostname == groups['master_nodes'][0]"
+
+    - name: Add bash-completion and Kubeconfig path to the .bashrc file
+      become: yes
+      ansible.builtin.blockinfile:
+        path: "{{ ansible_facts['env']['HOME'] }}/.bashrc"
+        block: |
+          
+          export KUBECONFIG={{ ansible_facts['env']['HOME'] }}/.kube/config
+          
+          source <(kubectl completion bash)
+        marker: "# {mark} ANSIBLE MANAGED BLOCK FOR AUTO-COMPLETION"
+        newline: yes
+      when: "inventory_hostname == groups['master_nodes'][0]"
+
+    - name: Reload .bashrc file
+      become: yes
+      ansible.builtin.shell: source {{ ansible_facts['env']['HOME'] }}/.bashrc
+      when: "inventory_hostname == groups['master_nodes'][0]"
+
+    - name: Check access to the cluster from root node
+      ansible.builtin.shell: kubectl get nodes
+      when: "inventory_hostname == groups['master_nodes'][0]"
+      failed_when: false
+      register: cluster_nodes
+
+    - name: Print Cluster Nodes
+      ansible.builtin.debug:
+        var: cluster_nodes
+      when: "inventory_hostname == groups['master_nodes'][0]"
