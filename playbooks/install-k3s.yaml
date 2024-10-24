@@ -28,6 +28,13 @@
         marker: "# {mark} ANSIBLE MANAGED BLOCK K3S NODES"
       when: "'ansible_host' in hostvars[inventory_hostname]"
 
+    - name: Remove swap from /etc/fstab
+      become: yes
+      ansible.builtin.shell: |
+        sudo sed -i '/\tswap\t/d' /etc/fstab
+        sudo swapoff -a
+      when: "inventory_hostname in hostvars[nodes]"
+
     - name: Create /etc/rancher/k3s
       become: yes
       ansible.builtin.file:
