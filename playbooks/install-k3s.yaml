@@ -33,7 +33,6 @@
       ansible.builtin.shell: |
         sudo sed -i '/\tswap\t/d' /etc/fstab
         sudo swapoff -a
-      when: "inventory_hostname in hostvars[nodes]"
 
     - name: Create /etc/rancher/k3s
       become: yes
@@ -154,7 +153,7 @@
           
           source <(kubectl completion bash)
         marker: "# {mark} ANSIBLE MANAGED BLOCK FOR AUTO-COMPLETION"
-        newline: yes
+        append_newline: yes
       when: "inventory_hostname == groups['master_nodes'][0]"
 
     - name: Reload .bashrc file
